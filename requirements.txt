@@ -1,1 +1,8 @@
 streamlit
+# 数据 / 工具
+pandas>=2.1.0
+numpy>=1.25.0
+joblib>=1.3.0
+# 可视化
+matplotlib>=3.8.0
+seaborn>=0.13.0
