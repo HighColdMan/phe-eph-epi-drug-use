@@ -12,7 +12,7 @@ st.set_page_config(page_title="术中用药预测系统", layout="wide")
 st.title("🎯 术中用药智能预测与模型可视化")
 st.markdown("---")
 
-RESULTS_DIR = "results_v3"
+RESULTS_DIR = "results"
 
 APPROACH_DEFAULT = 'Open'  
 
