@@ -5,6 +5,8 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
+import torch
+import torch.nn as nn
 
 # ===================
 # 基础设置
@@ -15,6 +17,35 @@ st.markdown("---")
 RESULTS_DIR = "results"
 
 APPROACH_DEFAULT = 'Open'  
+
+# 保存的特征顺序
+feature_order = ['age', 'sex', 'bmi', 'asa', 'preop_htn', 'preop_dm', 'preop_arrhythmia',
+                 'preop_pft', 'preop_hb', 'preop_plt', 'preop_pt', 'preop_aptt',
+                 'preop_na', 'preop_k', 'preop_glucose', 'preop_alb', 'preop_got',
+                 'preop_gpt', 'preop_bun', 'preop_cr', 'optype_Biliary/Pancreas',
+                 'optype_Breast', 'optype_Colorectal', 'optype_Hepatic',
+                 'optype_Major resection', 'optype_Minor resection', 'optype_Others',
+                 'optype_Stomach', 'optype_Thyroid', 'optype_Transplantation',
+                 'optype_Vascular', 'approach_Open', 'approach_Robotic',
+                 'approach_Videoscopic', 'age_missing', 'bmi_missing', 'asa_missing',
+                 'preop_htn_missing', 'preop_dm_missing', 'preop_arrhythmia_missing',
+                 'preop_pft_missing', 'preop_hb_missing', 'preop_plt_missing',
+                 'preop_pt_missing', 'preop_aptt_missing', 'preop_na_missing',
+                 'preop_k_missing', 'preop_glucose_missing', 'preop_alb_missing',
+                 'preop_got_missing', 'preop_gpt_missing', 'preop_bun_missing',
+                 'preop_cr_missing']
+
+# ==== 简单 MLP ====
+class MLP(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128), nn.BatchNorm1d(128), nn.LeakyReLU(), nn.Dropout(0.3),
+            nn.Linear(128, 64), nn.BatchNorm1d(64), nn.LeakyReLU(), nn.Dropout(0.3),
+            nn.Linear(64, 1)
+        )
+    def forward(self, x): return self.net(x).squeeze(1) 
+
 
 # approach专用处理
 def handle_approach(selected_approach):
@@ -193,21 +224,69 @@ if submit_btn:
     }
     # 加入approach独热
     input_dict.update(approach_dict)
+
+    # == 新增：缺失指示器特征 ==
+    missing_indicator_columns = [
+        'age_missing', 'bmi_missing', 'asa_missing', 'preop_htn_missing',
+        'preop_dm_missing', 'preop_arrhythmia_missing', 'preop_pft_missing',
+        'preop_hb_missing', 'preop_plt_missing', 'preop_pt_missing',
+        'preop_aptt_missing', 'preop_na_missing', 'preop_k_missing',
+        'preop_glucose_missing', 'preop_alb_missing', 'preop_got_missing',
+        'preop_gpt_missing', 'preop_bun_missing', 'preop_cr_missing'
+    ]
+
+    # 默认都填 0（假设输入时未专门处理缺失指示器）
+    for col in missing_indicator_columns:
+        input_dict[col] = 0
+
     input_df = pd.DataFrame([input_dict])
 
     # == 加载模型 ==
     stacking_model_path = os.path.join(RESULTS_DIR, selected_drug, "Stacking_weights.joblib")
+
+    mlp_model = MLP(53).to('cpu')
+
+    # 加载权重
+    mlp_model.load_state_dict(torch.load(os.path.join(RESULTS_DIR, selected_drug, "MLP_weights.pth"), map_location='cpu'))
+    mlp_model.eval()
+    # 加载 LightGBM 模型
+    lgbm_model = joblib.load(os.path.join(RESULTS_DIR, selected_drug, "LGBM_weights.joblib"))
+
+    # 加载 RandomForest 模型
+    rf_model = joblib.load(os.path.join(RESULTS_DIR, selected_drug, "RandomForest_weights.joblib"))
+
+    # 加载训练时保存的scaler
+    scaler_path = os.path.join(RESULTS_DIR, selected_drug, "scaler.joblib")
+    scaler = joblib.load(scaler_path)
+
     if not os.path.exists(stacking_model_path):
         st.error("找不到Stacking模型，请先训练模型。")
     else:
-        model = joblib.load(stacking_model_path)
+        stacking_model = joblib.load(stacking_model_path)
 
         # 保证输入顺序与训练时一致
-        trained_features = list(input_df.columns)
+        trained_features = feature_order
         input_array = input_df[trained_features].values
+        # === 归一化输入 ===
+        input_array_scaled = scaler.transform(input_array)  # ⬅️ 核心        
+        # MLP 输入需要转换为 torch 张量
+        input_tensor = torch.tensor(input_array_scaled, dtype=torch.float32).to('cpu')
+        # === Step 3. 各个底层模型输出概率 ===
 
-        # 预测
-        pred_proba = model.predict_proba(input_array)[:, 1][0]
+        # MLP 预测概率
+        with torch.no_grad():
+            mlp_proba = torch.sigmoid(mlp_model(input_tensor)).cpu().numpy()# 取出单个病人的概率
+
+        # LightGBM 预测概率
+        lgbm_proba = lgbm_model.predict_proba(input_array_scaled)[:, 1][0] # 取出概率
+
+        # RandomForest 预测概率
+        rf_proba = rf_model.predict_proba(input_array_scaled)[:, 1][0]
+        meta_feature = np.array([[float(mlp_proba), float(lgbm_proba), float(rf_proba)]])  # shape: (1, 3)
+
+        # Stacking 元模型预测
+        pred_proba = stacking_model.predict_proba(meta_feature)[:, 1][0] 
+
         prediction = "需要用药" if pred_proba >= 0.5 else "不需要用药"
 
         # 显示结果
